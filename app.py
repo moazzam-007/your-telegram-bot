@@ -3,6 +3,7 @@ import logging
 from flask import Flask, request, jsonify
 import asyncio
 import json
+from telegram import Update # Update ko yahan import kar liya for clarity
 
 # Configure logging
 logging.basicConfig(
@@ -15,17 +16,23 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Get configuration from environment variables
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7643897489:AAEw_iLZgsqd4Beb4CPQGPwfMIzGhaOuW5E')
+# Bot Token ko environment variable se lenge, hardcode na karein production mein
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_ACTUAL_BOT_TOKEN_HERE') # Make sure this is replaced with your actual token
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 5000))
 
-if not BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
+    logger.error("TELEGRAM_BOT_TOKEN environment variable is required and should be set on Render.")
+    # Exit or handle gracefully if token is not set, or is the placeholder
+    # For now, we will raise an error to ensure it's not run without proper token
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required and correctly set.")
+
 
 # Initialize bot application (lazy loading to avoid import issues)
 bot_application = None
 
-def get_bot_application():
+# get_bot_application ko async banaya gaya hai
+async def get_bot_application():
     """Lazy initialization of bot application and ensures it's properly initialized."""
     global bot_application
     if bot_application is None:
@@ -36,8 +43,8 @@ def get_bot_application():
             # Initialize Telegram bot application
             bot_application = Application.builder().token(BOT_TOKEN).build()
             
-            # *** ADDED THIS LINE FOR PROPER INITIALIZATION ***
-            bot_application.initialize() 
+            # *** AB initialize() ko await karna zaroori hai ***
+            await bot_application.initialize() 
 
             # Add handlers
             bot_application.add_handler(CommandHandler("start", start_handler))
@@ -62,11 +69,15 @@ def webhook():
         update_data = request.get_json()
         
         if update_data:
-            from telegram import Update
-            application = get_bot_application()
-            # No need to call initialize() here again as it's handled in get_bot_application()
+            # get_bot_application() ab async hai, isliye isko bhi await karna hoga
+            # Flask route functions async nahi ho sakte direct, isliye asyncio.run ka use
+            application = asyncio.run(get_bot_application())
+            
+            # update.de_json ko bhi async context mein run karna hai agar wo bhi async ho
+            # but usually it's sync. Agar problem aaye to ye line bhi check kar sakte hain.
             update = Update.de_json(update_data, application.bot)
-            asyncio.run(application.process_update(update))
+            
+            asyncio.run(application.process_update(update)) # process_update pehle se hi async run ho raha hai
             
         return jsonify({"status": "ok"})
         
@@ -103,7 +114,8 @@ def manual_webhook_setup():
         if not WEBHOOK_URL:
             return jsonify({"error": "WEBHOOK_URL not configured"}), 400
             
-        application = get_bot_application()
+        # get_bot_application() ab async hai, isliye isko bhi await karna hoga
+        application = asyncio.run(get_bot_application()) 
         webhook_url = f"{WEBHOOK_URL}/webhook"
         
         # Use synchronous approach for webhook setting
@@ -125,7 +137,9 @@ def manual_webhook_setup():
 if __name__ == '__main__':
     # Initialize bot application on startup
     try:
-        get_bot_application()
+        # get_bot_application() ab async hai, isliye isko await karna hoga
+        # direct asyncio.run() se call karenge
+        asyncio.run(get_bot_application())
         logger.info("Bot initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize bot: {e}")
