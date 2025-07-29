@@ -1,10 +1,10 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-# import asyncio # Ab iski zaroorat nahi
 import json
 from telegram import Update
-# from flask_asyncio import FlaskAsyncio # Is line ko hata dein
+import threading
+import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -15,10 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-# FlaskAsyncio(app) # Is line ko hata dein
 
 # Get configuration from environment variables
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_ACTUAL_BOT_TOKEN_HERE') 
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_ACTUAL_BOT_TOKEN_HERE')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 5000))
 
@@ -29,8 +28,7 @@ if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
 # Initialize bot application (lazy loading to avoid import issues)
 bot_application = None
 
-# get_bot_application ab bhi async rahega
-async def get_bot_application():
+def get_bot_application():
     """Lazy initialization of bot application and ensures it's properly initialized."""
     global bot_application
     if bot_application is None:
@@ -39,44 +37,63 @@ async def get_bot_application():
             from bot_handlers import start_handler, message_handler, help_handler
             
             bot_application = Application.builder().token(BOT_TOKEN).build()
-            await bot_application.initialize() 
-
+            
+            # Run initialization in event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(bot_application.initialize())
+            
             bot_application.add_handler(CommandHandler("start", start_handler))
             bot_application.add_handler(CommandHandler("help", help_handler))
             bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
             
             logger.info("Bot application initialized successfully")
-            
         except ImportError as e:
             logger.error(f"Import error: {e}")
             raise
         except Exception as e:
             logger.error(f"Error initializing bot: {e}")
             raise
-    
     return bot_application
 
-# Webhook route async hi rahega
+def process_update_sync(update_data):
+    """Process update in sync mode using asyncio"""
+    try:
+        application = get_bot_application()
+        update = Update.de_json(update_data, application.bot)
+        
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the async process_update
+        loop.run_until_complete(application.process_update(update))
+        loop.close()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return False
+
+# Webhook route - NOW SYNC
 @app.route('/webhook', methods=['POST'])
-async def webhook(): # <- Ab yahan asyncio.run() nahi hoga
+def webhook():
     """Handle incoming webhook requests from Telegram"""
     try:
         update_data = request.get_json()
-        
         if update_data:
-            application = await get_bot_application() # <- await karein
-            
-            update = Update.de_json(update_data, application.bot)
-            await application.process_update(update) # <- await karein
-            
-        return jsonify({"status": "ok"})
-        
+            # Process update in a separate thread to avoid blocking
+            thread = threading.Thread(target=process_update_sync, args=(update_data,))
+            thread.start()
+            return jsonify({"status": "ok"})
+        else:
+            return jsonify({"status": "error", "message": "No data received"}), 400
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
-async def health_check(): # <- async rehne dein
+def health_check():
     """Health check endpoint for monitoring"""
     return jsonify({
         "status": "healthy",
@@ -86,7 +103,7 @@ async def health_check(): # <- async rehne dein
     })
 
 @app.route('/', methods=['GET'])
-async def home(): # <- async rehne dein
+def home():
     """Root endpoint"""
     return jsonify({
         "message": "Amazon Affiliate Telegram Bot is running! 🤖",
@@ -98,16 +115,14 @@ async def home(): # <- async rehne dein
     })
 
 @app.route('/set_webhook', methods=['POST'])
-async def manual_webhook_setup(): # <- async rehne dein
+def manual_webhook_setup():
     """Manual webhook setup endpoint"""
     try:
         if not WEBHOOK_URL:
             return jsonify({"error": "WEBHOOK_URL not configured"}), 400
-            
-        application = await get_bot_application() # <- await karein
+
         webhook_url = f"{WEBHOOK_URL}/webhook"
         
-        # requests library synchronous hai, isko aise hi rehne dein
         import requests
         telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
         response = requests.post(telegram_api_url, json={"url": webhook_url})
@@ -124,13 +139,9 @@ async def manual_webhook_setup(): # <- async rehne dein
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Initializing bot_application outside of the Flask app context.
-    # Gunicorn with Uvicorn worker will manage worker processes.
-    # get_bot_application will be called on first request for each worker.
     logger.info("Starting Flask app. Bot initialization will happen on first request.")
     
-    # Set webhook for production - This block should ideally be handled externally
-    # or via a Render Deploy Hook to avoid running on every worker restart.
+    # Set webhook for production
     if WEBHOOK_URL:
         try:
             import requests
@@ -142,10 +153,7 @@ if __name__ == '__main__':
                 logger.info(f"Webhook set successfully to: {webhook_url}")
             else:
                 logger.warning(f"Failed to set webhook: {response.text}")
-                
         except Exception as e:
             logger.error(f"Error setting up webhook: {e}")
     
-    # Flask app will be run by Gunicorn, so app.run() is commented out.
     logger.info(f"Flask app is configured to be run by Gunicorn on port {PORT}")
-    # app.run(host='0.0.0.0', port=PORT, debug=False)
