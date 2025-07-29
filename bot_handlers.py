@@ -1,7 +1,6 @@
 import re
 import logging
-from telegram import Update
-from telegram.ext import ContextTypes
+import asyncio
 from amazon_scraper import AmazonScraper
 from url_shortener import URLShortener
 
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 amazon_scraper = AmazonScraper()
 url_shortener = URLShortener()
 
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_handler(update, context):
     """Handle /start command"""
     welcome_message = """
 🛍️ Welcome to Amazon Affiliate Bot! 
@@ -32,7 +31,7 @@ Type /help for more information! 🚀
     
     await update.message.reply_text(welcome_message)
 
-async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_handler(update, context):
     """Handle /help command"""
     help_message = """
 🔧 **Help & Instructions:**
@@ -58,7 +57,7 @@ Need more help? Just ask! 💬
     
     await update.message.reply_text(help_message)
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def message_handler(update, context):
     """Handle text messages"""
     message_text = update.message.text
     
@@ -72,13 +71,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await handle_general_message(update, context, message_text)
 
-async def handle_amazon_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+async def handle_amazon_url(update, context, url):
     """Handle Amazon product URL"""
     try:
         processing_msg = await update.message.reply_text("🔍 Processing kar raha hun... Wait karo! ⏳")
         
         # Extract product information
-        product_info = await amazon_scraper.extract_product_info(url)
+        product_info = amazon_scraper.extract_product_info(url)
         
         if not product_info:
             await processing_msg.edit_text(
@@ -91,7 +90,7 @@ async def handle_amazon_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         affiliate_url = amazon_scraper.generate_affiliate_link(url)
         
         # Shorten the affiliate link
-        shortened_url = await url_shortener.shorten_url(affiliate_url)
+        shortened_url = url_shortener.shorten_url(affiliate_url)
         
         # Prepare response message
         response_message = f"🛍️ **{product_info['title']}**\n\n"
@@ -124,7 +123,7 @@ async def handle_amazon_url(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             "Please thodi der baad try karo ya dusra link bhejo. 🔧"
         )
 
-async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str):
+async def handle_general_message(update, context, message):
     """Handle general conversation"""
     message_lower = message.lower()
     
