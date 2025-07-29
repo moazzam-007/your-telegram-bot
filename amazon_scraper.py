@@ -19,7 +19,7 @@ class AmazonScraper:
             'Upgrade-Insecure-Requests': '1',
         }
     
-    async def extract_product_info(self, url: str) -> Optional[Dict[str, str]]:
+    def extract_product_info(self, url: str) -> Optional[Dict[str, str]]:
         """Extract product information from Amazon URL"""
         try:
             clean_url = self._clean_amazon_url(url)
