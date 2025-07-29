@@ -13,10 +13,8 @@ import time
 import requests
 
 # Configure logging with more details
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG)
+
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
