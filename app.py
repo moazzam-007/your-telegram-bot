@@ -1,9 +1,10 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-import asyncio
+# import asyncio # Ab iski direct zaroorat nahi padegi for running coroutines
 import json
-from telegram import Update # Update ko yahan import kar liya for clarity
+from telegram import Update
+from flask_asyncio import FlaskAsyncio # Naya import
 
 # Configure logging
 logging.basicConfig(
@@ -14,24 +15,21 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+FlaskAsyncio(app) # Flask-Asyncio ko app ke saath initialize karein
 
 # Get configuration from environment variables
-# Bot Token ko environment variable se lenge, hardcode na karein production mein
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_ACTUAL_BOT_TOKEN_HERE') # Make sure this is replaced with your actual token
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_ACTUAL_BOT_TOKEN_HERE') 
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 5000))
 
 if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
     logger.error("TELEGRAM_BOT_TOKEN environment variable is required and should be set on Render.")
-    # Exit or handle gracefully if token is not set, or is the placeholder
-    # For now, we will raise an error to ensure it's not run without proper token
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required and correctly set.")
-
 
 # Initialize bot application (lazy loading to avoid import issues)
 bot_application = None
 
-# get_bot_application ko async banaya gaya hai
+# get_bot_application ab bhi async rahega
 async def get_bot_application():
     """Lazy initialization of bot application and ensures it's properly initialized."""
     global bot_application
@@ -40,13 +38,9 @@ async def get_bot_application():
             from telegram.ext import Application, CommandHandler, MessageHandler, filters
             from bot_handlers import start_handler, message_handler, help_handler
             
-            # Initialize Telegram bot application
             bot_application = Application.builder().token(BOT_TOKEN).build()
-            
-            # *** AB initialize() ko await karna zaroori hai ***
             await bot_application.initialize() 
 
-            # Add handlers
             bot_application.add_handler(CommandHandler("start", start_handler))
             bot_application.add_handler(CommandHandler("help", help_handler))
             bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -62,22 +56,18 @@ async def get_bot_application():
     
     return bot_application
 
+# Webhook route ko async banaya gaya
 @app.route('/webhook', methods=['POST'])
-def webhook():
+async def webhook(): # <- Make this function async
     """Handle incoming webhook requests from Telegram"""
     try:
         update_data = request.get_json()
         
         if update_data:
-            # get_bot_application() ab async hai, isliye isko bhi await karna hoga
-            # Flask route functions async nahi ho sakte direct, isliye asyncio.run ka use
-            application = asyncio.run(get_bot_application())
+            application = await get_bot_application() # <- await karein
             
-            # update.de_json ko bhi async context mein run karna hai agar wo bhi async ho
-            # but usually it's sync. Agar problem aaye to ye line bhi check kar sakte hain.
             update = Update.de_json(update_data, application.bot)
-            
-            asyncio.run(application.process_update(update)) # process_update pehle se hi async run ho raha hai
+            await application.process_update(update) # <- await karein
             
         return jsonify({"status": "ok"})
         
@@ -86,7 +76,7 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
-def health_check():
+async def health_check(): # <- Make this function async (optional but good practice if it ever uses async ops)
     """Health check endpoint for monitoring"""
     return jsonify({
         "status": "healthy",
@@ -96,7 +86,7 @@ def health_check():
     })
 
 @app.route('/', methods=['GET'])
-def home():
+async def home(): # <- Make this function async (optional)
     """Root endpoint"""
     return jsonify({
         "message": "Amazon Affiliate Telegram Bot is running! 🤖",
@@ -108,17 +98,16 @@ def home():
     })
 
 @app.route('/set_webhook', methods=['POST'])
-def manual_webhook_setup():
+async def manual_webhook_setup(): # <- Make this function async
     """Manual webhook setup endpoint"""
     try:
         if not WEBHOOK_URL:
             return jsonify({"error": "WEBHOOK_URL not configured"}), 400
             
-        # get_bot_application() ab async hai, isliye isko bhi await karna hoga
-        application = asyncio.run(get_bot_application()) 
+        application = await get_bot_application() # <- await karein
         webhook_url = f"{WEBHOOK_URL}/webhook"
         
-        # Use synchronous approach for webhook setting
+        # requests library synchronous hai, isko aise hi rehne dein
         import requests
         telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
         response = requests.post(telegram_api_url, json={"url": webhook_url})
@@ -135,21 +124,31 @@ def manual_webhook_setup():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Initialize bot application on startup
+    # Initializing bot_application outside of the Flask app context.
+    # Gunicorn will manage worker processes, so this block might behave differently.
+    # Best practice is to ensure get_bot_application() is called when a request comes in.
+    # We remove asyncio.run() here as Flask-Asyncio will manage the loop.
     try:
-        # get_bot_application() ab async hai, isliye isko await karna hoga
-        # direct asyncio.run() se call karenge
-        asyncio.run(get_bot_application())
-        logger.info("Bot initialized successfully")
+        # Instead of directly calling asyncio.run(get_bot_application())
+        # The bot application should be initialized in a way that Flask-Asyncio can manage it.
+        # Since get_bot_application is lazy, it will be called on first webhook hit.
+        logger.info("Starting Flask app. Bot initialization will happen on first request.")
     except Exception as e:
-        logger.error(f"Failed to initialize bot: {e}")
+        logger.error(f"Failed to prepare bot initialization: {e}")
     
     # Set webhook for production
+    # This block should ideally run only once on deployment, not on every app start by Gunicorn workers.
+    # You might want to remove this block from app.py and instead call /set_webhook endpoint once manually after deploy.
+    # Or, use Render's "Deploy Hook" feature to run a one-time script for webhook setup.
     if WEBHOOK_URL:
         try:
             import requests
             webhook_url = f"{WEBHOOK_URL}/webhook"
             telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+            
+            # This part should be non-blocking or happen in a separate thread/process
+            # for a true async Flask app, but for now we'll keep it as is,
+            # trusting it mostly runs once on initial setup.
             response = requests.post(telegram_api_url, json={"url": webhook_url}, timeout=10)
             
             if response.status_code == 200:
@@ -162,4 +161,6 @@ if __name__ == '__main__':
     
     # Run Flask app
     logger.info(f"Starting Flask app on port {PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Flask-Asyncio provides an async run method, but for Gunicorn,
+    # you just use 'gunicorn app:app' and Flask-Asyncio integrates automatically.
+    # app.run(host='0.0.0.0', port=PORT, debug=False) # This is not needed when using Gunicorn
