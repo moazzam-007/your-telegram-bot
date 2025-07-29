@@ -2,7 +2,7 @@ import os
 
 class Config:
     # Telegram Bot Configuration
-    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7643897489:AAEw_iLZgsqd4Beb4CPQGPwfMIzGhaOuW5E')
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     WEBHOOK_URL = os.getenv('WEBHOOK_URL')
     
     # Server Configuration
