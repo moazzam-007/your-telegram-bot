@@ -79,18 +79,22 @@ def get_bot_handlers():
     """Import and return bot handlers"""
     try:
         from bot_handlers import start_handler, message_handler, help_handler
+        logger.info("✅ Bot handlers imported successfully")
         return start_handler, message_handler, help_handler
     except ImportError as e:
         logger.error(f"Failed to import bot handlers: {e}")
         # Fallback handlers
         async def fallback_start(update, context):
             await update.message.reply_text("🤖 Bot is working! Send me Amazon links!")
+            logger.info("Fallback start handler executed")
         
         async def fallback_message(update, context):
             await update.message.reply_text("I received your message! Send Amazon product links for affiliate conversion!")
+            logger.info("Fallback message handler executed")
             
         async def fallback_help(update, context):
             await update.message.reply_text("Send me Amazon product URLs and I'll create affiliate links for you!")
+            logger.info("Fallback help handler executed")
             
         return fallback_start, fallback_message, fallback_help
 
@@ -132,10 +136,11 @@ async def process_single_update(update_data):
             return False
             
         update_id = update_data.get('update_id', 'unknown')
-        logger.info(f"🔄 Processing update: {update_id}")
+        logger.info(f"🔄 Starting to process update: {update_id}")
         
         # Create update object
         update = Update.de_json(update_data, bot_application.bot)
+        logger.info(f"✅ Update object created for: {update_id}")
         
         # Process update
         await bot_application.process_update(update)
@@ -159,30 +164,49 @@ def bot_worker():
     asyncio.set_event_loop(loop)
     
     try:
-        # Initialize bot in this thread if not already done
-        if not bot_initialized:
+        # Initialize the bot application if needed
+        if bot_application and not bot_initialized:
             logger.info("🔄 Initializing bot in worker thread...")
             if not initialize_bot():
                 logger.error("❌ Failed to initialize bot in worker thread")
                 return
         
         # Initialize the bot application
-        loop.run_until_complete(bot_application.initialize())
-        logger.info("✅ Bot initialized successfully in worker thread")
+        if bot_application:
+            logger.info("🔄 Initializing bot application in worker thread...")
+            loop.run_until_complete(bot_application.initialize())
+            logger.info("✅ Bot initialized successfully in worker thread")
+        else:
+            logger.error("❌ Bot application is None in worker thread")
+            return
         
-        # Process updates
+        # Main processing loop
+        logger.info("🔄 Starting update processing loop...")
+        processed_count = 0
+        
         while True:
             try:
                 # Get update from queue with timeout
-                update_data = update_queue.get(timeout=5)
-                update_id = update_data.get('update_id', 'unknown')
-                logger.info(f"📥 Got update from queue: {update_id}")
+                logger.debug("🔍 Waiting for updates in queue...")
+                update_data = update_queue.get(timeout=3)
                 
-                # Process the update
-                success = loop.run_until_complete(process_single_update(update_data))
+                update_id = update_data.get('update_id', 'unknown')
+                logger.info(f"📥 Got update from queue: {update_id} (Total processed: {processed_count})")
+                
+                # Process the update with timeout
+                try:
+                    success = asyncio.wait_for(
+                        process_single_update(update_data), 
+                        timeout=30.0
+                    )
+                    success = loop.run_until_complete(success)
+                except asyncio.TimeoutError:
+                    logger.error(f"⏰ Timeout processing update {update_id}")
+                    success = False
                 
                 if success:
-                    logger.info(f"✅ Successfully processed update {update_id}")
+                    processed_count += 1
+                    logger.info(f"✅ Successfully processed update {update_id} (Total: {processed_count})")
                 else:
                     logger.error(f"❌ Failed to process update {update_id}")
                 
@@ -191,10 +215,12 @@ def bot_worker():
                 
             except queue.Empty:
                 # No updates in queue, continue waiting
+                logger.debug("📭 No updates in queue, waiting...")
                 continue
             except Exception as e:
-                logger.error(f"❌ Error in bot worker: {e}")
+                logger.error(f"❌ Error in bot worker loop: {e}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
+                # Don't break the loop, continue processing
                 
     except Exception as e:
         logger.error(f"💥 Fatal error in bot worker: {e}")
@@ -202,6 +228,7 @@ def bot_worker():
     finally:
         try:
             loop.close()
+            logger.info("🔚 Bot worker loop closed")
         except:
             pass
 
@@ -216,7 +243,11 @@ def webhook():
             return jsonify({"status": "error", "message": "No data received"}), 400
             
         update_id = update_data.get('update_id', 'unknown')
-        logger.info(f"📨 Received update: {update_id}")
+        message_text = ""
+        if 'message' in update_data and 'text' in update_data['message']:
+            message_text = update_data['message']['text'][:50]
+            
+        logger.info(f"📨 Received update: {update_id} - Message: '{message_text}'")
         
         # Add update to queue for processing
         update_queue.put(update_data)
@@ -249,7 +280,7 @@ def home():
     return jsonify({
         "message": "Amazon Affiliate Telegram Bot is running! 🤖",
         "endpoints": {
-            "webhook": "/webhook",
+            "webhook": "/webhook (POST only)",
             "health": "/health",
             "debug": "/debug",
             "set_webhook": "/set_webhook"
@@ -270,7 +301,8 @@ def debug_info():
         "bot_token_length": len(BOT_TOKEN) if BOT_TOKEN else 0,
         "webhook_url": WEBHOOK_URL,
         "webhook_configured": webhook_set,
-        "port": PORT
+        "port": PORT,
+        "bot_token_valid": BOT_TOKEN != 'YOUR_ACTUAL_BOT_TOKEN_HERE'
     })
 
 @app.route('/set_webhook', methods=['POST', 'GET'])
