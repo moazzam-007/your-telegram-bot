@@ -1,10 +1,8 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import asyncio
-from bot_handlers import start_handler, message_handler, help_handler
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -17,20 +15,42 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Get configuration from environment variables
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7643897489:AAEw_iLZgsqd4Beb4CPQGPwfMIzGhaOuW5E')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 5000))
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
 
-# Initialize Telegram bot application
-application = Application.builder().token(BOT_TOKEN).build()
+# Initialize bot application (lazy loading to avoid import issues)
+bot_application = None
 
-# Add handlers
-application.add_handler(CommandHandler("start", start_handler))
-application.add_handler(CommandHandler("help", help_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+def get_bot_application():
+    """Lazy initialization of bot application"""
+    global bot_application
+    if bot_application is None:
+        try:
+            from telegram.ext import Application, CommandHandler, MessageHandler, filters
+            from bot_handlers import start_handler, message_handler, help_handler
+            
+            # Initialize Telegram bot application
+            bot_application = Application.builder().token(BOT_TOKEN).build()
+            
+            # Add handlers
+            bot_application.add_handler(CommandHandler("start", start_handler))
+            bot_application.add_handler(CommandHandler("help", help_handler))
+            bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+            
+            logger.info("Bot application initialized successfully")
+            
+        except ImportError as e:
+            logger.error(f"Import error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error initializing bot: {e}")
+            raise
+    
+    return bot_application
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -39,6 +59,8 @@ def webhook():
         update_data = request.get_json()
         
         if update_data:
+            from telegram import Update
+            application = get_bot_application()
             update = Update.de_json(update_data, application.bot)
             asyncio.run(application.process_update(update))
             
@@ -53,7 +75,9 @@ def health_check():
     """Health check endpoint for monitoring"""
     return jsonify({
         "status": "healthy",
-        "message": "Amazon Affiliate Telegram Bot is running"
+        "message": "Amazon Affiliate Telegram Bot is running",
+        "bot_token_set": bool(BOT_TOKEN),
+        "webhook_url_set": bool(WEBHOOK_URL)
     })
 
 @app.route('/', methods=['GET'])
@@ -64,28 +88,60 @@ def home():
         "endpoints": {
             "webhook": "/webhook",
             "health": "/health"
-        }
+        },
+        "status": "active"
     })
 
-async def set_webhook():
-    """Set webhook URL for the bot"""
+@app.route('/set_webhook', methods=['POST'])
+def manual_webhook_setup():
+    """Manual webhook setup endpoint"""
     try:
-        if WEBHOOK_URL:
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            await application.bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook set to: {webhook_url}")
+        if not WEBHOOK_URL:
+            return jsonify({"error": "WEBHOOK_URL not configured"}), 400
+            
+        application = get_bot_application()
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        
+        # Use synchronous approach for webhook setting
+        import requests
+        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+        response = requests.post(telegram_api_url, json={"url": webhook_url})
+        
+        if response.status_code == 200:
+            logger.info(f"Webhook set successfully to: {webhook_url}")
+            return jsonify({"status": "success", "webhook_url": webhook_url})
         else:
-            logger.warning("WEBHOOK_URL not set")
+            logger.error(f"Failed to set webhook: {response.text}")
+            return jsonify({"error": "Failed to set webhook"}), 500
+            
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
+    # Initialize bot application on startup
+    try:
+        get_bot_application()
+        logger.info("Bot initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize bot: {e}")
+    
     # Set webhook for production
     if WEBHOOK_URL:
         try:
-            asyncio.run(set_webhook())
+            import requests
+            webhook_url = f"{WEBHOOK_URL}/webhook"
+            telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+            response = requests.post(telegram_api_url, json={"url": webhook_url}, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Webhook set successfully to: {webhook_url}")
+            else:
+                logger.warning(f"Failed to set webhook: {response.text}")
+                
         except Exception as e:
             logger.error(f"Error setting up webhook: {e}")
     
     # Run Flask app
+    logger.info(f"Starting Flask app on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
