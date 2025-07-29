@@ -26,7 +26,7 @@ if not BOT_TOKEN:
 bot_application = None
 
 def get_bot_application():
-    """Lazy initialization of bot application"""
+    """Lazy initialization of bot application and ensures it's properly initialized."""
     global bot_application
     if bot_application is None:
         try:
@@ -36,6 +36,9 @@ def get_bot_application():
             # Initialize Telegram bot application
             bot_application = Application.builder().token(BOT_TOKEN).build()
             
+            # *** ADDED THIS LINE FOR PROPER INITIALIZATION ***
+            bot_application.initialize() 
+
             # Add handlers
             bot_application.add_handler(CommandHandler("start", start_handler))
             bot_application.add_handler(CommandHandler("help", help_handler))
@@ -61,11 +64,12 @@ def webhook():
         if update_data:
             from telegram import Update
             application = get_bot_application()
+            # No need to call initialize() here again as it's handled in get_bot_application()
             update = Update.de_json(update_data, application.bot)
             asyncio.run(application.process_update(update))
             
         return jsonify({"status": "ok"})
-    
+        
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
