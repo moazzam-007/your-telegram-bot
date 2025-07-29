@@ -5,12 +5,12 @@ import json
 from telegram import Update
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import threading
+import traceback
 
-# Configure logging
+# Configure logging with more details
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # Changed to DEBUG for more info
 )
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
 # Global variables
 bot_application = None
 main_loop = None
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=2)
 
 def initialize_bot_sync():
     """Initialize bot in the main thread with persistent event loop"""
@@ -37,6 +37,8 @@ def initialize_bot_sync():
     
     if bot_application is None:
         try:
+            logger.info("Starting bot initialization...")
+            
             from telegram.ext import Application, CommandHandler, MessageHandler, filters
             from bot_handlers import start_handler, message_handler, help_handler
             
@@ -59,6 +61,7 @@ def initialize_bot_sync():
             
         except Exception as e:
             logger.error(f"Error initializing bot: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
     
     return bot_application
@@ -68,11 +71,15 @@ def process_update_in_main_loop(update_data):
     try:
         global bot_application, main_loop
         
+        logger.debug(f"Processing update: {update_data}")
+        
         if bot_application is None:
+            logger.warning("Bot not initialized, initializing now...")
             initialize_bot_sync()
         
         # Create update object
         update = Update.de_json(update_data, bot_application.bot)
+        logger.debug(f"Update object created: {update}")
         
         # Process update in main loop
         future = asyncio.run_coroutine_threadsafe(
@@ -81,30 +88,44 @@ def process_update_in_main_loop(update_data):
         )
         
         # Wait for completion with timeout
-        future.result(timeout=30)
+        result = future.result(timeout=30)
+        logger.debug(f"Update processed successfully: {result}")
         return True
         
     except Exception as e:
         logger.error(f"Error processing update: {e}")
+        logger.error(f"Update data: {update_data}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 # Initialize bot on startup
-initialize_bot_sync()
+try:
+    logger.info("Initializing bot on startup...")
+    initialize_bot_sync()
+    logger.info("Bot initialized successfully on startup")
+except Exception as e:
+    logger.error(f"Failed to initialize bot on startup: {e}")
 
 # Webhook route - SYNC
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming webhook requests from Telegram"""
     try:
+        logger.debug("Webhook endpoint called")
         update_data = request.get_json()
+        
         if update_data:
+            logger.debug(f"Received update data: {update_data}")
             # Process in executor to avoid blocking
             future = executor.submit(process_update_in_main_loop, update_data)
             return jsonify({"status": "ok"})
         else:
+            logger.warning("No data received in webhook")
             return jsonify({"status": "error", "message": "No data received"}), 400
+            
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
+        logger.error(f"Error in webhook endpoint: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
