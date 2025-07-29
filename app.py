@@ -3,8 +3,9 @@ import logging
 from flask import Flask, request, jsonify
 import json
 from telegram import Update
-import threading
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -25,66 +26,80 @@ if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
     logger.error("TELEGRAM_BOT_TOKEN environment variable is required and should be set on Render.")
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required and correctly set.")
 
-# Initialize bot application (lazy loading to avoid import issues)
+# Global variables
 bot_application = None
+main_loop = None
+executor = ThreadPoolExecutor(max_workers=4)
 
-def get_bot_application():
-    """Lazy initialization of bot application and ensures it's properly initialized."""
-    global bot_application
+def initialize_bot_sync():
+    """Initialize bot in the main thread with persistent event loop"""
+    global bot_application, main_loop
+    
     if bot_application is None:
         try:
             from telegram.ext import Application, CommandHandler, MessageHandler, filters
             from bot_handlers import start_handler, message_handler, help_handler
             
+            # Create and set persistent event loop
+            main_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(main_loop)
+            
+            # Initialize bot application
             bot_application = Application.builder().token(BOT_TOKEN).build()
             
-            # Run initialization in event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(bot_application.initialize())
+            # Run initialization
+            main_loop.run_until_complete(bot_application.initialize())
             
+            # Add handlers
             bot_application.add_handler(CommandHandler("start", start_handler))
             bot_application.add_handler(CommandHandler("help", help_handler))
             bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
             
-            logger.info("Bot application initialized successfully")
-        except ImportError as e:
-            logger.error(f"Import error: {e}")
-            raise
+            logger.info("Bot application initialized successfully with persistent event loop")
+            
         except Exception as e:
             logger.error(f"Error initializing bot: {e}")
             raise
+    
     return bot_application
 
-def process_update_sync(update_data):
-    """Process update in sync mode using asyncio"""
+def process_update_in_main_loop(update_data):
+    """Process update using the main event loop"""
     try:
-        application = get_bot_application()
-        update = Update.de_json(update_data, application.bot)
+        global bot_application, main_loop
         
-        # Create new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        if bot_application is None:
+            initialize_bot_sync()
         
-        # Run the async process_update
-        loop.run_until_complete(application.process_update(update))
-        loop.close()
+        # Create update object
+        update = Update.de_json(update_data, bot_application.bot)
         
+        # Process update in main loop
+        future = asyncio.run_coroutine_threadsafe(
+            bot_application.process_update(update), 
+            main_loop
+        )
+        
+        # Wait for completion with timeout
+        future.result(timeout=30)
         return True
+        
     except Exception as e:
         logger.error(f"Error processing update: {e}")
         return False
 
-# Webhook route - NOW SYNC
+# Initialize bot on startup
+initialize_bot_sync()
+
+# Webhook route - SYNC
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming webhook requests from Telegram"""
     try:
         update_data = request.get_json()
         if update_data:
-            # Process update in a separate thread to avoid blocking
-            thread = threading.Thread(target=process_update_sync, args=(update_data,))
-            thread.start()
+            # Process in executor to avoid blocking
+            future = executor.submit(process_update_in_main_loop, update_data)
             return jsonify({"status": "ok"})
         else:
             return jsonify({"status": "error", "message": "No data received"}), 400
@@ -99,7 +114,8 @@ def health_check():
         "status": "healthy",
         "message": "Amazon Affiliate Telegram Bot is running",
         "bot_token_set": bool(BOT_TOKEN),
-        "webhook_url_set": bool(WEBHOOK_URL)
+        "webhook_url_set": bool(WEBHOOK_URL),
+        "bot_initialized": bot_application is not None
     })
 
 @app.route('/', methods=['GET'])
@@ -139,7 +155,7 @@ def manual_webhook_setup():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    logger.info("Starting Flask app. Bot initialization will happen on first request.")
+    logger.info("Starting Flask app with initialized bot.")
     
     # Set webhook for production
     if WEBHOOK_URL:
