@@ -10,6 +10,7 @@ import traceback
 import threading
 import queue
 import time
+import requests
 
 # Configure logging with more details
 logging.basicConfig(
@@ -34,14 +35,74 @@ if not BOT_TOKEN or BOT_TOKEN == 'YOUR_ACTUAL_BOT_TOKEN_HERE':
 bot_application = None
 update_queue = queue.Queue()
 bot_thread = None
+bot_initialized = False
+webhook_set = False
+
+def set_telegram_webhook():
+    """Set Telegram webhook"""
+    global webhook_set
+    
+    if not WEBHOOK_URL:
+        logger.warning("WEBHOOK_URL not set, cannot configure webhook")
+        return False
+        
+    try:
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+        
+        logger.info(f"Setting webhook to: {webhook_url}")
+        
+        response = requests.post(
+            telegram_api_url, 
+            json={"url": webhook_url},
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('ok'):
+                logger.info(f"✅ Webhook set successfully to: {webhook_url}")
+                webhook_set = True
+                return True
+            else:
+                logger.error(f"❌ Telegram API error: {result}")
+                return False
+        else:
+            logger.error(f"❌ HTTP error setting webhook: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Exception setting webhook: {e}")
+        return False
+
+def get_bot_handlers():
+    """Import and return bot handlers"""
+    try:
+        from bot_handlers import start_handler, message_handler, help_handler
+        return start_handler, message_handler, help_handler
+    except ImportError as e:
+        logger.error(f"Failed to import bot handlers: {e}")
+        # Fallback handlers
+        async def fallback_start(update, context):
+            await update.message.reply_text("🤖 Bot is working! Send me Amazon links!")
+        
+        async def fallback_message(update, context):
+            await update.message.reply_text("I received your message! Send Amazon product links for affiliate conversion!")
+            
+        async def fallback_help(update, context):
+            await update.message.reply_text("Send me Amazon product URLs and I'll create affiliate links for you!")
+            
+        return fallback_start, fallback_message, fallback_help
 
 def initialize_bot():
     """Initialize bot application"""
-    global bot_application
+    global bot_application, bot_initialized
     
     try:
-        logger.info("Starting bot initialization...")
-        from bot_handlers import start_handler, message_handler, help_handler
+        logger.info("🚀 Starting bot initialization...")
+        
+        # Get handlers
+        start_handler, message_handler, help_handler = get_bot_handlers()
         
         # Initialize bot application
         bot_application = Application.builder().token(BOT_TOKEN).build()
@@ -51,13 +112,15 @@ def initialize_bot():
         bot_application.add_handler(CommandHandler("help", help_handler))
         bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
         
-        logger.info("Bot application initialized successfully")
-        return bot_application
+        bot_initialized = True
+        logger.info("✅ Bot application initialized successfully")
+        return True
         
     except Exception as e:
-        logger.error(f"Error initializing bot: {e}")
+        logger.error(f"❌ Error initializing bot: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
+        bot_initialized = False
+        return False
 
 async def process_single_update(update_data):
     """Process a single update"""
@@ -65,56 +128,82 @@ async def process_single_update(update_data):
         global bot_application
         
         if bot_application is None:
-            logger.error("Bot application not initialized")
+            logger.error("❌ Bot application not initialized")
             return False
             
+        update_id = update_data.get('update_id', 'unknown')
+        logger.info(f"🔄 Processing update: {update_id}")
+        
         # Create update object
         update = Update.de_json(update_data, bot_application.bot)
         
-        # Initialize bot if not done
-        if not bot_application.bot.token:
-            await bot_application.initialize()
-            
         # Process update
         await bot_application.process_update(update)
-        logger.info("Update processed successfully")
+        logger.info(f"✅ Update {update_id} processed successfully")
         return True
         
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
+        logger.error(f"❌ Error processing update: {e}")
+        logger.error(f"Update data: {update_data}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 def bot_worker():
     """Background worker for processing updates"""
+    global bot_application, bot_initialized
+    
+    logger.info("🚀 Bot worker thread started")
+    
+    # Create new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        # Initialize bot in the worker thread
-        loop.run_until_complete(bot_application.initialize())
-        logger.info("Bot initialized in worker thread")
+        # Initialize bot in this thread if not already done
+        if not bot_initialized:
+            logger.info("🔄 Initializing bot in worker thread...")
+            if not initialize_bot():
+                logger.error("❌ Failed to initialize bot in worker thread")
+                return
         
+        # Initialize the bot application
+        loop.run_until_complete(bot_application.initialize())
+        logger.info("✅ Bot initialized successfully in worker thread")
+        
+        # Process updates
         while True:
             try:
                 # Get update from queue with timeout
-                update_data = update_queue.get(timeout=1)
+                update_data = update_queue.get(timeout=5)
+                update_id = update_data.get('update_id', 'unknown')
+                logger.info(f"📥 Got update from queue: {update_id}")
                 
                 # Process the update
-                loop.run_until_complete(process_single_update(update_data))
+                success = loop.run_until_complete(process_single_update(update_data))
+                
+                if success:
+                    logger.info(f"✅ Successfully processed update {update_id}")
+                else:
+                    logger.error(f"❌ Failed to process update {update_id}")
                 
                 # Mark task as done
                 update_queue.task_done()
                 
             except queue.Empty:
+                # No updates in queue, continue waiting
                 continue
             except Exception as e:
-                logger.error(f"Error in bot worker: {e}")
+                logger.error(f"❌ Error in bot worker: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 
     except Exception as e:
-        logger.error(f"Fatal error in bot worker: {e}")
+        logger.error(f"💥 Fatal error in bot worker: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
     finally:
-        loop.close()
+        try:
+            loop.close()
+        except:
+            pass
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -123,18 +212,20 @@ def webhook():
         update_data = request.get_json()
         
         if not update_data:
-            logger.warning("No data received in webhook")
+            logger.warning("⚠️ No data received in webhook")
             return jsonify({"status": "error", "message": "No data received"}), 400
             
-        logger.info(f"Received update: {update_data.get('update_id', 'unknown')}")
+        update_id = update_data.get('update_id', 'unknown')
+        logger.info(f"📨 Received update: {update_id}")
         
         # Add update to queue for processing
         update_queue.put(update_data)
+        logger.info(f"📋 Update {update_id} added to queue. Queue size: {update_queue.qsize()}")
         
         return jsonify({"status": "ok"})
         
     except Exception as e:
-        logger.error(f"Error in webhook endpoint: {e}")
+        logger.error(f"❌ Error in webhook endpoint: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -144,10 +235,12 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "message": "Amazon Affiliate Telegram Bot is running",
-        "bot_token_set": bool(BOT_TOKEN),
+        "bot_token_set": bool(BOT_TOKEN and BOT_TOKEN != 'YOUR_ACTUAL_BOT_TOKEN_HERE'),
         "webhook_url_set": bool(WEBHOOK_URL),
-        "bot_initialized": bot_application is not None,
-        "queue_size": update_queue.qsize()
+        "webhook_configured": webhook_set,
+        "bot_initialized": bot_initialized,
+        "queue_size": update_queue.qsize(),
+        "worker_thread_alive": bot_thread.is_alive() if bot_thread else False
     })
 
 @app.route('/', methods=['GET'])
@@ -157,33 +250,49 @@ def home():
         "message": "Amazon Affiliate Telegram Bot is running! 🤖",
         "endpoints": {
             "webhook": "/webhook",
-            "health": "/health"
+            "health": "/health",
+            "debug": "/debug",
+            "set_webhook": "/set_webhook"
         },
-        "status": "active"
+        "status": "active",
+        "bot_status": "initialized" if bot_initialized else "not_initialized",
+        "webhook_status": "configured" if webhook_set else "not_configured"
     })
 
-@app.route('/set_webhook', methods=['POST'])
+@app.route('/debug', methods=['GET'])
+def debug_info():
+    """Debug endpoint"""
+    return jsonify({
+        "bot_initialized": bot_initialized,
+        "bot_application_exists": bot_application is not None,
+        "queue_size": update_queue.qsize(),
+        "worker_thread_alive": bot_thread.is_alive() if bot_thread else False,
+        "bot_token_length": len(BOT_TOKEN) if BOT_TOKEN else 0,
+        "webhook_url": WEBHOOK_URL,
+        "webhook_configured": webhook_set,
+        "port": PORT
+    })
+
+@app.route('/set_webhook', methods=['POST', 'GET'])
 def manual_webhook_setup():
     """Manual webhook setup endpoint"""
     try:
-        if not WEBHOOK_URL:
-            return jsonify({"error": "WEBHOOK_URL not configured"}), 400
-            
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        import requests
+        result = set_telegram_webhook()
         
-        telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-        response = requests.post(telegram_api_url, json={"url": webhook_url})
-        
-        if response.status_code == 200:
-            logger.info(f"Webhook set successfully to: {webhook_url}")
-            return jsonify({"status": "success", "webhook_url": webhook_url})
+        if result:
+            return jsonify({
+                "status": "success", 
+                "webhook_url": f"{WEBHOOK_URL}/webhook",
+                "message": "Webhook configured successfully"
+            })
         else:
-            logger.error(f"Failed to set webhook: {response.text}")
-            return jsonify({"error": "Failed to set webhook"}), 500
+            return jsonify({
+                "status": "error", 
+                "message": "Failed to configure webhook"
+            }), 500
             
     except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
+        logger.error(f"❌ Error in manual webhook setup: {e}")
         return jsonify({"error": str(e)}), 500
 
 def start_bot_worker():
@@ -193,33 +302,39 @@ def start_bot_worker():
     if bot_thread is None or not bot_thread.is_alive():
         bot_thread = threading.Thread(target=bot_worker, daemon=True)
         bot_thread.start()
-        logger.info("Bot worker thread started")
+        logger.info("🚀 Bot worker thread started")
+        
+        # Wait a moment for thread to start
+        time.sleep(2)
+        
+        if bot_thread.is_alive():
+            logger.info("✅ Bot worker thread is running")
+        else:
+            logger.error("❌ Bot worker thread failed to start")
+    else:
+        logger.info("ℹ️ Bot worker thread already running")
+
+# Initialize when module is imported (for Gunicorn)
+logger.info("🔧 Initializing application...")
+
+# Initialize bot
+if initialize_bot():
+    logger.info("✅ Bot initialized successfully")
+    
+    # Start worker thread
+    start_bot_worker()
+    
+    # Set webhook (important: do this after bot initialization)
+    if WEBHOOK_URL:
+        # Wait a bit for everything to initialize
+        time.sleep(1)
+        set_telegram_webhook()
+    else:
+        logger.warning("⚠️ WEBHOOK_URL not set, skipping webhook configuration")
+else:
+    logger.error("❌ Failed to initialize bot")
+
+logger.info("🎉 Application ready!")
 
 if __name__ == '__main__':
-    # Initialize bot
-    initialize_bot()
-    
-    # Start bot worker thread
-    start_bot_worker()
-    
-    # Set webhook for production
-    if WEBHOOK_URL:
-        try:
-            import requests
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            telegram_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-            response = requests.post(telegram_api_url, json={"url": webhook_url}, timeout=10)
-            
-            if response.status_code == 200:
-                logger.info(f"Webhook set successfully to: {webhook_url}")
-            else:
-                logger.warning(f"Failed to set webhook: {response.text}")
-        except Exception as e:
-            logger.error(f"Error setting up webhook: {e}")
-    
-    logger.info(f"Flask app is configured to be run by Gunicorn on port {PORT}")
-    
-    # Initialize bot and start worker when imported by Gunicorn
-    if bot_application is None:
-        initialize_bot()
-    start_bot_worker()
+    logger.info(f"🚀 Flask app ready on port {PORT}")
