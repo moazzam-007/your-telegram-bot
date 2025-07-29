@@ -8,7 +8,7 @@ class URLShortener:
     def __init__(self):
         self.tinyurl_api = "http://tinyurl.com/api-create.php"
     
-    async def shorten_url(self, url: str) -> str:
+    def shorten_url(self, url: str) -> str:
         """Shorten URL using TinyURL service"""
         try:
             params = {'url': url}
